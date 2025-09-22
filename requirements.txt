@@ -1,4 +1,4 @@
 # Backend dependencies
-flask==3.0.3
-flask-cors==4.0.1
-
+flask
+flask-cors
+gunicorn
