@@ -2,14 +2,43 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 import json, os, re
 from datetime import datetime
-
+from werkzeug.utils import secure_filename
+from flask import Flask, request, jsonify, url_for, send_from_directory
+import uuid
 app = Flask(__name__)
 CORS(app)
 
-# --- Storage paths (Windows local testing) ---
-BASE_DATA_DIR = r"C:\Users\rueedit\test\plastic_mgr\backend\data"
-os.makedirs(BASE_DATA_DIR, exist_ok=True)
-CARDS_FILE = os.path.join(BASE_DATA_DIR, "cards.json")
+#python version 3.11.9
+
+
+# --- app + dirs ---
+app = Flask(__name__)
+CORS(app)
+
+BASE_DATA_DIR = r"C:\PythonProjects\Plastic_mgr\Backend\data"  #--> use on private PC
+# --- app + dirs ---
+# BASE_DATA_DIR = r"C:\Users\rueedit\test\plastic_mgr\backend\data"   # <-- align with your real folders
+
+ATTACH_DIR  = os.path.join(BASE_DATA_DIR, "attachments")
+STAGING_DIR = os.path.join(BASE_DATA_DIR, "uploads")                # you already use "uploads" for staging
+CARDS_FILE  = os.path.join(BASE_DATA_DIR, "cards.json")
+
+for p in (BASE_DATA_DIR, ATTACH_DIR, STAGING_DIR):
+    os.makedirs(p, exist_ok=True)
+
+app.config.update(PREFERRED_URL_SCHEME="http")
+# app.config.update(SERVER_NAME="127.0.0.1:5000")  # only if you run behind proxies or need stable ext URLs
+
+#normalize legacy records that only have path
+def _abs_url(card_id, meta):
+    if meta.get("url", "").startswith(("http://","https://")):
+        return meta["url"]
+    rest = meta.get("path","").split(f"/files/{card_id}/", 1)[-1]
+    try:
+        return url_for("download_file", card_id=card_id, filename=rest, _external=True)
+    except Exception:
+        return request.url_root.rstrip("/") + f"/files/{card_id}/{rest}"
+
 
 # --- Helpers: load/save ---
 def load_cards():
@@ -70,6 +99,108 @@ def find_card(cards, card_id):
         if c.get("card_id","").upper() == card_id.upper():
             return c
     return None
+
+
+
+def ensure_card_dirs(card_id, item_id=None):
+    base = os.path.join(ATTACH_DIR, card_id)
+    os.makedirs(base, exist_ok=True)
+    if item_id:
+        base = os.path.join(base, item_id)
+        os.makedirs(base, exist_ok=True)
+    return base
+
+def staged_path_from_token(token: str):
+    # staged file names look like: <token>__<original_name>
+    for name in os.listdir(STAGING_DIR):
+        if name.startswith(f"{token}__"):
+            return os.path.join(STAGING_DIR, name), name.split("__", 1)[1]
+    return None, None
+
+# --- commit staged file to a card/item ---
+@app.route("/attachments/commit", methods=["POST"])
+def commit_attachment():
+    data = request.json or {}
+    token   = data.get("token")
+    card_id = data.get("card_id")
+    item_id = data.get("item_id") or None
+    if not token or not card_id:
+        return jsonify({"error":"token and card_id required"}), 400
+
+    cards = load_cards()
+    card = find_card(cards, card_id)
+    if not card:
+        return jsonify({"error":"card not found"}), 404
+    if item_id:
+        it = next((i for i in card.get("items", []) if i["item_id"].upper()==item_id.upper()), None)
+        if not it:
+            return jsonify({"error":"item not found"}), 404
+
+    staged_path, original_name = staged_path_from_token(token)
+    if not staged_path or not os.path.exists(staged_path):
+        return jsonify({"error":"staged file not found"}), 404
+
+    target_dir = ensure_card_dirs(card["card_id"], item_id)
+    final_name = secure_filename(original_name or "upload.bin")
+    final_path = os.path.join(target_dir, final_name)
+    os.replace(staged_path, final_path)
+
+    rest = f"{item_id}/{final_name}" if item_id else final_name
+    meta = {
+        "filename": final_name,
+        "mime": data.get("mime") or "",
+        "uploaded_at": datetime.utcnow().isoformat() + "Z",
+        "path": f"/files/{card['card_id']}/{rest}",
+    }
+    meta["url"] = _abs_url(card["card_id"], meta)
+
+
+    if item_id:
+        it.setdefault("attachments", []).append(meta)
+    else:
+        card.setdefault("attachments", []).append(meta)
+
+    save_cards(cards)
+    return jsonify({"status":"committed","meta":meta}), 200
+
+
+
+
+
+@app.route("/uploads", methods=["POST"])
+def stage_upload():
+    try:
+        if "file" not in request.files:
+            return jsonify({"error": "missing file"}), 400
+        f = request.files["file"]
+        if not f or not f.filename:
+            return jsonify({"error": "empty filename"}), 400
+
+        token = uuid.uuid4().hex
+        fname = secure_filename(f.filename or "upload.bin")
+        staged_name = f"{token}__{fname}"
+        dst = os.path.join(STAGING_DIR, staged_name)
+
+        os.makedirs(STAGING_DIR, exist_ok=True)
+        f.save(dst)
+
+        size = os.path.getsize(dst)
+        meta = {
+            "token": token,
+            "filename": fname,
+            "mime": f.mimetype or "",
+            "size": size,
+            "uploaded_at": datetime.utcnow().isoformat() + "Z",
+        }
+        return jsonify({"status": "staged", "meta": meta}), 201
+
+    except Exception as e:
+        app.logger.exception("stage_upload failed")
+        return jsonify({"error": "internal", "detail": str(e)}), 500
+
+
+
+
 
 # --- Root ---
 @app.route("/", methods=["GET"])
@@ -188,6 +319,93 @@ def openapi():
         },
     }
     return jsonify(spec), 200
+
+
+
+@app.route("/files/<card_id>/<path:filename>", methods=["GET"])
+def download_file(card_id, filename):
+    return send_from_directory(os.path.join(ATTACH_DIR, card_id), filename, as_attachment=False)
+
+
+@app.route("/cards/<card_id>/attachments", methods=["POST"])
+def upload_card_attachment(card_id):
+    cards = load_cards()
+    card = find_card(cards, card_id)
+    if not card:
+        return jsonify({"error": "card not found"}), 404
+
+    if "file" not in request.files:
+        return jsonify({"error": "missing file"}), 400
+
+    f = request.files["file"]
+    if not f or not f.filename:
+        return jsonify({"error": "empty filename"}), 400
+
+    item_id = request.form.get("item_id") or None
+    if item_id:
+        it = next((i for i in card.get("items", []) if i.get("item_id","").upper() == item_id.upper()), None)
+        if not it:
+            return jsonify({"error":"item not found"}), 404
+
+    # filesystem destination
+    dest_dir = ensure_card_dirs(card["card_id"], item_id)
+    fname = secure_filename(f.filename or "upload.bin")
+    final_path = os.path.join(dest_dir, fname)
+    os.makedirs(dest_dir, exist_ok=True)
+    f.save(final_path)
+
+    # build metadata (path + absolute url)
+    rest = f"{item_id}/{fname}" if item_id else fname
+    meta = {
+        "filename": fname,
+        "mime": getattr(f, "mimetype", "") or "",
+        "uploaded_at": datetime.utcnow().isoformat() + "Z",
+        "path": f"/files/{card['card_id']}/{rest}",
+    }
+ 
+ 
+
+    # persist on card or item
+    meta["url"] = _abs_url(card["card_id"], meta) 
+    if item_id:
+        it.setdefault("attachments", []).append(meta)
+    else:
+        card.setdefault("attachments", []).append(meta)
+
+    save_cards(cards)
+    return jsonify({"status":"uploaded","meta":meta}), 201
+
+@app.route("/cards/<card_id>/attachments", methods=["GET"])
+def list_card_attachments(card_id):
+    cards = load_cards()
+    card = find_card(cards, card_id)
+    if not card:
+        return jsonify([]), 200  # keep UI simple
+
+    out = []
+    for a in card.get("attachments", []) or []:
+        meta = dict(a)
+        meta["url"] = _abs_url(card["card_id"], meta)   # normalize ALWAYS
+        out.append(meta)
+    return jsonify(out), 200
+
+@app.route("/cards/<card_id>/items/<item_id>/attachments", methods=["GET"])
+def list_item_attachments(card_id, item_id):
+    cards = load_cards()
+    card = find_card(cards, card_id)
+    if not card:
+        return jsonify([]), 200
+    it = next((i for i in card.get("items", []) if i.get("item_id","").upper() == item_id.upper()), None)
+    if not it:
+        return jsonify([]), 200
+
+    out = []
+    for a in it.get("attachments", []) or []:
+        meta = dict(a)
+        meta["url"] = _abs_url(card["card_id"], meta)
+        out.append(meta)
+    return jsonify(out), 200
+
 
 if __name__ == "__main__":
     # Local dev: http://127.0.0.1:5000
