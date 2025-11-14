@@ -5,6 +5,7 @@ from datetime import datetime
 from werkzeug.utils import secure_filename
 from flask import Flask, request, jsonify, url_for, send_from_directory
 import uuid
+import os
 app = Flask(__name__)
 CORS(app)
 
@@ -15,7 +16,7 @@ CORS(app)
 app = Flask(__name__)
 CORS(app)
 
-BASE_DATA_DIR = r"C:\PythonProjects\Plastic_mgr\Backend\data"  #--> use on private PC
+BASE_DATA_DIR = os.environ.get("BASE_DATA_DIR", "/data")
 # --- app + dirs ---
 # BASE_DATA_DIR = r"C:\Users\rueedit\test\plastic_mgr\backend\data"   # <-- align with your real folders
 
@@ -410,3 +411,4 @@ def list_item_attachments(card_id, item_id):
 if __name__ == "__main__":
     # Local dev: http://127.0.0.1:5000
     app.run(host="0.0.0.0", port=5000)
+
