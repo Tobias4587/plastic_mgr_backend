@@ -17,7 +17,7 @@ CORS(app)
 
 # BASE_DATA_DIR = r"C:\PythonProjects\Plastic_mgr\Backend\data"  --> use on private PC
 # --- app + dirs ---
-BASE_DATA_DIR = r"C:\Users\rueedit\test\plastic_mgr\backend\data"   # <-- align with your real folders
+BASE_DATA_DIR = os.environ.get("BASE_DATA_DIR", "/data")   # <-- align with your real folders
 
 ATTACH_DIR  = os.path.join(BASE_DATA_DIR, "attachments")
 STAGING_DIR = os.path.join(BASE_DATA_DIR, "uploads")                # you already use "uploads" for staging
@@ -360,3 +360,4 @@ def openapi():
 if __name__ == "__main__":
     # Local dev: http://127.0.0.1:5000
     app.run(host="0.0.0.0", port=5000)
+
